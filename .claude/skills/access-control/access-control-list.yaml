@@ -1,0 +1,902 @@
+# Claude Code Access Control - Rule List
+# =======================================
+# Structured rules for blocking dangerous commands.
+# Rules are matched in order — first match wins.
+#
+# bashToolRules fields:
+#   id           - unique identifier (required)
+#   command      - exact or glob match on command name, e.g. "rm", "mkfs*"
+#   subcommand   - exact match on second token, e.g. "push" for "git push"
+#   flags        - ANY of these flags triggers the rule (OR logic)
+#   args         - ALL of these must be present as positional args (AND logic, glob ok)
+#   contains     - substring must be present in full command (case-insensitive)
+#   excludes     - substring must NOT be present in full command
+#   contains_all - all substrings must be present in full command
+#   reason       - human-readable explanation shown on block
+#   action       - block (exit 2) | ask (confirmation dialog)
+#
+# Note: rules checked in order, first match wins.
+# Note: eval, base64-decode+exec, and find-exec bypasses are always blocked
+#       by the hook directly (not configurable here).
+
+bashToolRules:
+
+  # ---------------------------------------------------------------------------
+  # DESTRUCTIVE FILE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: rm-recursive-or-force
+    command: rm
+    flags: ["-rf", "-fr", "-r", "-R", "--recursive", "-f", "--force",
+            "-rfl", "-rfd", "-rfv", "-rvf", "-fvr", "-fvR"]
+    reason: rm with recursive or force flags
+    action: block
+
+  - id: sudo-rm
+    command: sudo
+    args: ["rm"]
+    reason: sudo rm
+    action: block
+
+  - id: rmdir-ignore-fail
+    command: rmdir
+    flags: ["--ignore-fail-on-non-empty"]
+    reason: rmdir --ignore-fail-on-non-empty
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # PERMISSION CHANGES
+  # ---------------------------------------------------------------------------
+
+  - id: chmod-world-writable
+    command: chmod
+    args: ["777"]
+    reason: chmod 777 (world writable — grants access to everyone)
+    action: block
+
+  - id: chown-recursive-root
+    command: chown
+    flags: ["-R", "-r", "--recursive"]
+    args: ["*root*"]
+    reason: recursive chown to root
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # GIT DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: git-reset-hard
+    command: git
+    subcommand: reset
+    flags: ["--hard"]
+    reason: git reset --hard discards all uncommitted changes permanently
+    action: block
+
+  - id: git-clean-force
+    command: git
+    subcommand: clean
+    flags: ["-f", "--force", "-fd", "-df", "-fdn", "-dfn", "-fx",
+            "-xf", "-fxd", "-dfx", "-xfd", "-dxf"]
+    reason: git clean with force flag deletes untracked files permanently
+    action: block
+
+  - id: git-force-push
+    command: git
+    subcommand: push
+    flags: ["--force", "-f"]
+    reason: git push --force overwrites remote history (use --force-with-lease)
+    action: block
+
+  - id: git-stash-clear
+    command: git
+    subcommand: stash
+    args: ["clear"]
+    reason: git stash clear deletes ALL stashes permanently
+    action: block
+
+  - id: git-reflog-expire
+    command: git
+    subcommand: reflog
+    args: ["expire"]
+    reason: git reflog expire destroys the recovery mechanism
+    action: block
+
+  - id: git-gc-prune-now
+    command: git
+    subcommand: gc
+    flags: ["--prune=now"]
+    reason: git gc --prune=now can lose dangling commits
+    action: block
+
+  - id: git-filter-branch
+    command: git
+    subcommand: filter-branch
+    reason: git filter-branch rewrites entire history
+    action: block
+
+  - id: git-commit
+    command: git
+    subcommand: commit 
+    reason: git commit only after permission 
+    action: ask 
+
+  # ---------------------------------------------------------------------------
+  # GIT OPERATIONS REQUIRING CONFIRMATION
+  # ---------------------------------------------------------------------------
+
+  - id: git-checkout-restore-all
+    command: git
+    subcommand: checkout
+    contains: "-- ."
+    reason: Discards all uncommitted changes
+    action: ask
+
+  - id: git-restore-all
+    command: git
+    subcommand: restore
+    args: ["."]
+    reason: Discards all uncommitted changes
+    action: ask
+
+  - id: git-stash-drop
+    command: git
+    subcommand: stash
+    args: ["drop"]
+    reason: Permanently deletes a stash
+    action: ask
+
+  - id: git-branch-force-delete
+    command: git
+    subcommand: branch
+    flags: ["-D"]
+    reason: Force deletes branch even if unmerged
+    action: ask
+
+  - id: git-push-delete-remote
+    command: git
+    subcommand: push
+    flags: ["--delete"]
+    reason: Deletes a remote branch
+    action: ask
+
+  - id: git-push-delete-colon
+    command: git
+    subcommand: push
+    args: [":*"]
+    reason: Deletes a remote branch (colon syntax)
+    action: ask
+
+  # ---------------------------------------------------------------------------
+  # SYSTEM-LEVEL DESTRUCTION
+  # ---------------------------------------------------------------------------
+
+  - id: mkfs-format
+    command: "mkfs*"
+    reason: filesystem format command — permanently destroys all data on device
+    action: block
+
+  - id: dd-to-device
+    command: dd
+    args: ["of=/dev/*"]
+    reason: dd writing directly to a device
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # PROCESS DESTRUCTION
+  # ---------------------------------------------------------------------------
+
+  - id: kill-all-processes
+    command: kill
+    contains: "-9 -1"
+    reason: kill -9 -1 kills all processes on the system
+    action: block
+
+  - id: killall-force
+    command: killall
+    flags: ["-9"]
+    reason: killall -9 force-kills all matching processes
+    action: block
+
+  - id: pkill-force
+    command: pkill
+    flags: ["-9"]
+    reason: pkill -9 force-kills matching processes
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # HISTORY / SHELL MANIPULATION
+  # ---------------------------------------------------------------------------
+
+  - id: history-clear
+    command: history
+    flags: ["-c"]
+    reason: history -c clears shell history
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # AWS CLI DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: aws-s3-rm-recursive
+    command: aws
+    subcommand: s3
+    args: ["rm"]
+    flags: ["--recursive"]
+    reason: aws s3 rm --recursive deletes all objects in the path
+    action: block
+
+  - id: aws-s3-rb-force
+    command: aws
+    subcommand: s3
+    args: ["rb"]
+    flags: ["--force"]
+    reason: aws s3 rb --force force-removes an entire bucket
+    action: block
+
+  - id: aws-ec2-terminate
+    command: aws
+    subcommand: ec2
+    args: ["terminate-instances"]
+    reason: aws ec2 terminate-instances permanently terminates EC2 instances
+    action: block
+
+  - id: aws-rds-delete
+    command: aws
+    subcommand: rds
+    args: ["delete-db-instance"]
+    reason: aws rds delete-db-instance permanently deletes a database
+    action: block
+
+  - id: aws-cloudformation-delete
+    command: aws
+    subcommand: cloudformation
+    args: ["delete-stack"]
+    reason: aws cloudformation delete-stack destroys all stack infrastructure
+    action: block
+
+  - id: aws-dynamodb-delete
+    command: aws
+    subcommand: dynamodb
+    args: ["delete-table"]
+    reason: aws dynamodb delete-table permanently removes a table and all data
+    action: block
+
+  - id: aws-eks-delete
+    command: aws
+    subcommand: eks
+    args: ["delete-cluster"]
+    reason: aws eks delete-cluster permanently removes a Kubernetes cluster
+    action: block
+
+  - id: aws-lambda-delete
+    command: aws
+    subcommand: lambda
+    args: ["delete-function"]
+    reason: aws lambda delete-function permanently removes a Lambda function
+    action: block
+
+  - id: aws-iam-delete-role
+    command: aws
+    subcommand: iam
+    args: ["delete-role"]
+    reason: aws iam delete-role permanently removes an IAM role
+    action: block
+
+  - id: aws-iam-delete-user
+    command: aws
+    subcommand: iam
+    args: ["delete-user"]
+    reason: aws iam delete-user permanently removes an IAM user
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # GCP (gcloud) DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: gcloud-projects-delete
+    command: gcloud
+    subcommand: projects
+    args: ["delete"]
+    reason: gcloud projects delete removes the ENTIRE GCP project
+    action: block
+
+  - id: gcloud-compute-instances-delete
+    command: gcloud
+    subcommand: compute
+    args: ["instances", "delete"]
+    reason: gcloud compute instances delete permanently removes compute instances
+    action: block
+
+  - id: gcloud-sql-instances-delete
+    command: gcloud
+    subcommand: sql
+    args: ["instances", "delete"]
+    reason: gcloud sql instances delete permanently removes a Cloud SQL instance
+    action: block
+
+  - id: gcloud-container-clusters-delete
+    command: gcloud
+    subcommand: container
+    args: ["clusters", "delete"]
+    reason: gcloud container clusters delete removes a GKE cluster
+    action: block
+
+  - id: gcloud-storage-rm-recursive
+    command: gcloud
+    subcommand: storage
+    args: ["rm"]
+    flags: ["-r", "--recursive"]
+    reason: gcloud storage rm -r recursively deletes all objects
+    action: block
+
+  - id: gcloud-functions-delete
+    command: gcloud
+    subcommand: functions
+    args: ["delete"]
+    reason: gcloud functions delete permanently removes a Cloud Function
+    action: block
+
+  - id: gcloud-iam-service-accounts-delete
+    command: gcloud
+    subcommand: iam
+    args: ["service-accounts", "delete"]
+    reason: gcloud iam service-accounts delete permanently removes a service account
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # FIREBASE DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: firebase-projects-delete
+    command: firebase
+    args: ["projects:delete"]
+    reason: firebase projects:delete removes the entire Firebase project
+    action: block
+
+  - id: firebase-firestore-delete-all
+    command: firebase
+    args: ["firestore:delete"]
+    flags: ["--all-collections"]
+    reason: firebase firestore:delete --all-collections wipes all Firestore data
+    action: block
+
+  - id: firebase-database-remove
+    command: firebase
+    args: ["database:remove"]
+    reason: firebase database:remove wipes the Realtime Database
+    action: block
+
+  - id: firebase-hosting-disable
+    command: firebase
+    args: ["hosting:disable"]
+    reason: firebase hosting:disable disables Firebase Hosting
+    action: block
+
+  - id: firebase-functions-delete
+    command: firebase
+    args: ["functions:delete"]
+    reason: firebase functions:delete permanently removes Cloud Functions
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # VERCEL DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: vercel-remove
+    command: vercel
+    args: ["remove"]
+    flags: ["--yes", "-y"]
+    reason: vercel remove --yes removes a deployment without confirmation
+    action: block
+
+  - id: vercel-projects-rm
+    command: vercel
+    subcommand: projects
+    args: ["rm"]
+    reason: vercel projects rm deletes a project
+    action: block
+
+  - id: vercel-env-rm
+    command: vercel
+    subcommand: env
+    args: ["rm"]
+    flags: ["--yes", "-y"]
+    reason: vercel env rm --yes removes environment variables without confirmation
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # NETLIFY DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: netlify-sites-delete
+    command: netlify
+    args: ["sites:delete"]
+    reason: netlify sites:delete permanently removes a Netlify site
+    action: block
+
+  - id: netlify-functions-delete
+    command: netlify
+    args: ["functions:delete"]
+    reason: netlify functions:delete permanently removes a function
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # CLOUDFLARE (wrangler) DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: wrangler-delete
+    command: wrangler
+    args: ["delete"]
+    reason: wrangler delete removes a Worker
+    action: block
+
+  - id: wrangler-r2-bucket-delete
+    command: wrangler
+    subcommand: r2
+    args: ["bucket", "delete"]
+    reason: wrangler r2 bucket delete removes an R2 bucket
+    action: block
+
+  - id: wrangler-kv-namespace-delete
+    command: wrangler
+    args: ["kv:namespace", "delete"]
+    reason: wrangler kv:namespace delete removes a KV namespace
+    action: block
+
+  - id: wrangler-d1-delete
+    command: wrangler
+    subcommand: d1
+    args: ["delete"]
+    reason: wrangler d1 delete removes a D1 database
+    action: block
+
+  - id: wrangler-queues-delete
+    command: wrangler
+    subcommand: queues
+    args: ["delete"]
+    reason: wrangler queues delete removes a queue
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # DOCKER DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: docker-system-prune-all
+    command: docker
+    subcommand: system
+    args: ["prune"]
+    flags: ["-a", "--all"]
+    reason: docker system prune -a removes all unused images, containers, and volumes
+    action: block
+
+  - id: docker-rm-force
+    command: docker
+    subcommand: rm
+    flags: ["-f", "--force"]
+    reason: docker rm -f force-removes running containers
+    action: block
+
+  - id: docker-rmi-force
+    command: docker
+    subcommand: rmi
+    flags: ["-f", "--force"]
+    reason: docker rmi -f force-removes images
+    action: block
+
+  - id: docker-volume-rm
+    command: docker
+    subcommand: volume
+    args: ["rm"]
+    reason: docker volume rm removes a volume and its data
+    action: block
+
+  - id: docker-volume-prune
+    command: docker
+    subcommand: volume
+    args: ["prune"]
+    reason: docker volume prune removes all unused volumes
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # KUBERNETES (kubectl) DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: kubectl-delete-namespace
+    command: kubectl
+    subcommand: delete
+    args: ["namespace"]
+    reason: kubectl delete namespace removes a namespace and all its resources
+    action: block
+
+  - id: kubectl-delete-all
+    command: kubectl
+    subcommand: delete
+    args: ["all"]
+    flags: ["--all"]
+    reason: kubectl delete all --all removes all resources in the namespace
+    action: block
+
+  - id: kubectl-delete-all-namespaces
+    command: kubectl
+    subcommand: delete
+    contains: "--all-namespaces"
+    reason: kubectl delete across all namespaces
+    action: block
+
+  - id: helm-uninstall
+    command: helm
+    args: ["uninstall"]
+    reason: helm uninstall removes a Helm release and its resources
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # DATABASE CLI DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: redis-flushall
+    command: redis-cli
+    args: ["FLUSHALL"]
+    reason: redis-cli FLUSHALL wipes ALL data across all databases
+    action: block
+
+  - id: redis-flushdb
+    command: redis-cli
+    args: ["FLUSHDB"]
+    reason: redis-cli FLUSHDB wipes the current database
+    action: block
+
+  - id: mongo-drop-database
+    contains: "dropDatabase"
+    reason: MongoDB dropDatabase permanently removes a database
+    action: block
+
+  - id: dropdb
+    command: dropdb
+    reason: PostgreSQL dropdb permanently removes a database
+    action: block
+
+  - id: mysqladmin-drop
+    command: mysqladmin
+    args: ["drop"]
+    reason: mysqladmin drop permanently removes a MySQL database
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # INFRASTRUCTURE AS CODE DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: terraform-destroy
+    command: terraform
+    args: ["destroy"]
+    reason: terraform destroy permanently destroys all managed infrastructure
+    action: block
+
+  - id: pulumi-destroy
+    command: pulumi
+    args: ["destroy"]
+    reason: pulumi destroy permanently destroys all managed resources
+    action: block
+
+  - id: serverless-remove
+    command: serverless
+    args: ["remove"]
+    reason: serverless remove removes the entire serverless stack
+    action: block
+
+  - id: sls-remove
+    command: sls
+    args: ["remove"]
+    reason: sls remove removes the entire serverless stack
+    action: block
+
+  - id: sam-delete
+    command: sam
+    args: ["delete"]
+    reason: sam delete permanently removes a SAM application
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # HEROKU DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: heroku-apps-destroy
+    command: heroku
+    args: ["apps:destroy"]
+    reason: heroku apps:destroy permanently destroys an application
+    action: block
+
+  - id: heroku-pg-reset
+    command: heroku
+    args: ["pg:reset"]
+    reason: heroku pg:reset wipes the Heroku PostgreSQL database
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # OTHER CLOUD PLATFORMS
+  # ---------------------------------------------------------------------------
+
+  - id: fly-apps-destroy
+    command: fly
+    subcommand: apps
+    args: ["destroy"]
+    reason: fly apps destroy permanently removes a Fly.io application
+    action: block
+
+  - id: fly-destroy
+    command: fly
+    args: ["destroy"]
+    reason: fly destroy permanently removes a Fly.io resource
+    action: block
+
+  - id: doctl-droplet-delete
+    command: doctl
+    subcommand: compute
+    args: ["droplet", "delete"]
+    reason: doctl droplet delete permanently removes a DigitalOcean droplet
+    action: block
+
+  - id: doctl-databases-delete
+    command: doctl
+    subcommand: databases
+    args: ["delete"]
+    reason: doctl databases delete permanently removes a managed database
+    action: block
+
+  - id: supabase-db-reset
+    command: supabase
+    subcommand: db
+    args: ["reset"]
+    reason: supabase db reset wipes and resets the local database
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # GITHUB CLI DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: gh-repo-delete
+    command: gh
+    subcommand: repo
+    args: ["delete"]
+    reason: gh repo delete permanently removes a GitHub repository
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # PACKAGE REGISTRY DESTRUCTIVE OPERATIONS
+  # ---------------------------------------------------------------------------
+
+  - id: npm-unpublish
+    command: npm
+    args: ["unpublish"]
+    reason: npm unpublish permanently removes a package from the registry
+    action: block
+
+  # ---------------------------------------------------------------------------
+  # SQL DESTRUCTIVE OPERATIONS
+  # Note: these use contains/excludes matching since SQL appears as a string
+  # argument to cli tools (sqlite3, psql, mysql, etc.). Rules checked in order —
+  # the more specific ask rule must come BEFORE the general block rule.
+  # ---------------------------------------------------------------------------
+
+  - id: sql-delete-with-id
+    contains_all: ["DELETE FROM", "WHERE"]
+    reason: SQL DELETE with WHERE clause — confirm before proceeding
+    action: ask
+
+  - id: sql-delete-without-where
+    contains: "DELETE FROM"
+    excludes: "WHERE"
+    reason: DELETE without WHERE clause will delete ALL rows
+    action: block
+
+  - id: sql-truncate-table
+    contains: "TRUNCATE TABLE"
+    reason: TRUNCATE TABLE permanently removes all rows
+    action: block
+
+  - id: sql-drop-table
+    contains: "DROP TABLE"
+    reason: DROP TABLE permanently removes a table and all its data
+    action: block
+
+  - id: sql-drop-database
+    contains: "DROP DATABASE"
+    reason: DROP DATABASE permanently removes an entire database
+    action: block
+
+
+# ---------------------------------------------------------------------------
+# ZERO ACCESS PATHS - No read, write, or any access allowed
+# ---------------------------------------------------------------------------
+# These contain secrets/credentials — block ALL operations including reads.
+# Enforced by: Bash, Edit, Write, Read, Grep tools.
+# Supports glob patterns: *.pem, .env*, *-credentials.json
+zeroAccessPaths:
+
+  # Environment files (HIGH RISK — contain secrets)
+  - ".env"
+  - ".env.*"
+  - ".env*.local"
+  - "*.env"
+
+  # SSH keys and config
+  - "~/.ssh/"
+
+  # GPG keys
+  - "~/.gnupg/"
+
+   # AWS credentials
+  - "~/.aws/"
+
+  # GCP credentials
+  - "~/.config/gcloud/"
+  - "*-credentials.json"
+  - "*serviceAccount*.json"
+  - "*service-account*.json"
+
+  # Azure credentials
+  - "~/.azure/"
+
+  # Kubernetes config
+  - "~/.kube/"
+  - "kubeconfig"
+  - "*-secret.yaml"
+  - "secrets.yaml"
+
+  # Docker credentials
+  - "~/.docker/"
+
+  # SSL/TLS certificates and private keys
+  - "*.pem"
+  - "*.key"
+  - "*.p12"
+  - "*.pfx"
+
+  # Terraform state (contains secrets in plaintext)
+  - "*.tfstate"
+  - "*.tfstate.backup"
+  - ".terraform/"
+
+  # Platform tokens
+  - ".vercel/"
+  - ".netlify/"
+
+  # Firebase / Supabase credentials
+  - "firebase-adminsdk*.json"
+  - "serviceAccountKey.json"
+  - ".supabase/"
+
+  # Package manager credentials
+  - "~/.netrc"
+  - "~/.npmrc"
+  - "~/.pypirc"
+  - "~/.git-credentials"
+  - ".git-credentials"
+
+  # Database dumps (may contain production data)
+  - "dump.sql"
+  - "backup.sql"
+  - "*.dump"
+
+
+# ---------------------------------------------------------------------------
+# READ-ONLY PATHS - Can read, but not write/edit/delete
+# ---------------------------------------------------------------------------
+# Safe to read but should never be modified by AI.
+# Enforced by: Bash, Edit, Write tools.
+# Supports glob patterns: *.lock, *.min.js
+readOnlyPaths:
+
+  # System directories
+  - /etc/
+  - /usr/
+  - /bin/
+  - /sbin/
+  - /boot/
+  - /root/
+
+  # Shell history files
+  - ~/.bash_history
+  - ~/.zsh_history
+  - ~/.node_repl_history
+
+  # Shell config files
+  - ~/.bashrc
+  - ~/.zshrc
+  - ~/.profile
+  - ~/.bash_profile
+
+  # Claude Code Access Control - Rule List
+  - ~/.claude/hooks/claude-code-access-list/
+
+  # Lock files — never manually edit, use package managers
+  - "package-lock.json"
+  - "yarn.lock"
+  - "pnpm-lock.yaml"
+  - "Gemfile.lock"
+  - "poetry.lock"
+  - "Pipfile.lock"
+  - "composer.lock"
+  - "Cargo.lock"
+  - "go.sum"
+  - "flake.lock"
+  - "bun.lockb"
+  - "uv.lock"
+  - "npm-shrinkwrap.json"
+  - "*.lock"
+  - "*.lockb"
+
+  # Minified / compiled files — generated, don't edit
+  - "*.min.js"
+  - "*.min.css"
+  - "*.bundle.js"
+  - "*.chunk.js"
+
+  # Build artifacts — generated directories, don't edit
+  - dist/
+  - build/
+  - out/
+  - .next/
+  - .nuxt/
+  - .output/
+  - node_modules/
+  - __pycache__/
+  - .venv/
+  - venv/
+  - target/
+
+
+# ---------------------------------------------------------------------------
+# NO-DELETE PATHS - Can read/write/edit, but not delete
+# ---------------------------------------------------------------------------
+# Protect important files from accidental deletion.
+# Enforced by: Bash tool only (Edit/Write don't delete files).
+# Supports glob patterns: *.md, LICENSE*
+noDeletePaths:
+
+  # Claude Code configuration
+  - ~/.claude/
+  - CLAUDE.md
+
+  # License and legal files
+  - "LICENSE"
+  - "LICENSE.*"
+  - "COPYING"
+  - "COPYING.*"
+  - "NOTICE"
+  - "PATENTS"
+
+  # Project documentation
+  - "README.md"
+  - "README.*"
+  - "CONTRIBUTING.md"
+  - "CHANGELOG.md"
+  - "CODE_OF_CONDUCT.md"
+  - "SECURITY.md"
+
+  # Git directory
+  - .git/
+  - .gitignore
+  - .gitattributes
+  - .gitmodules
+
+  # CI/CD configuration
+  - .github/
+  - .gitlab-ci.yml
+  - .circleci/
+  - Jenkinsfile
+  - .travis.yml
+  - azure-pipelines.yml
+
+  # Docker configuration
+  - Dockerfile
+  - "Dockerfile.*"
+  - docker-compose.yml
+  - "docker-compose.*.yml"
+  - .dockerignore
+
+  # Uncomment to protect source directories:
+  - src/
+  # - lib/
+  # - app/
+  # - tests/
+  # - docs/
