@@ -445,6 +445,74 @@ def test_nodelete_paths(runner: TestRunner, config: Dict[str, Any]) -> None:
         runner.check_bash(path, cmd, "block", config)
 
 
+def test_compound_command_bypasses(runner: TestRunner, config: Dict[str, Any]) -> None:
+    """Test that compound/chained commands cannot bypass access control rules."""
+    runner.section("Compound Command Bypass Prevention")
+
+    cases = [
+        # --- Command chaining (&&, ||, ;) ---
+        ("chain-cd-then-rm-rf",        "cd /tmp && rm -rf .",                     "block"),
+        ("chain-cd-then-git-worktree", "cd /project && git worktree remove x",    "block"),
+        ("chain-cd-then-git-reset",    "cd /repo && git reset --hard",            "block"),
+        ("chain-echo-then-rm",         "echo hello && rm -rf /tmp",               "block"),
+        ("semicolon-rm",               "echo hello; rm -rf /tmp",                 "block"),
+        ("or-chain-rm",                "false || rm -rf /tmp",                    "block"),
+        ("background-rm",              "rm -rf /tmp &",                           "block"),
+        ("newline-rm",                 "echo hello\nrm -rf /tmp",                "block"),
+        ("chain-git-push-force",       "cd /repo && git push --force",            "block"),
+        ("chain-git-clean",            "cd /repo && git clean -fd",               "block"),
+
+        # --- Pipe + xargs ---
+        ("pipe-xargs-rm-rf",           "find . | xargs rm -rf",                  "block"),
+        ("pipe-xargs-rm",              "echo file | xargs rm",                   "block"),
+
+        # --- Wrapper commands ---
+        ("env-rm-rf",                  "env rm -rf /tmp",                         "block"),
+        ("command-rm-rf",              "command rm -rf /tmp",                     "block"),
+        ("nohup-rm-rf",               "nohup rm -rf /tmp",                       "block"),
+        ("nice-rm-rf",                 "nice -n 10 rm -rf /tmp",                 "block"),
+        ("time-rm-rf",                 "time rm -rf /tmp",                        "block"),
+        ("builtin-eval",              "builtin eval 'rm -rf /'",                 "block"),
+        ("env-var-rm",                 "env FORCE=1 rm -rf /tmp",                "block"),
+        ("sudo-u-rm",                  "sudo -u root rm -rf /tmp",               "block"),
+
+        # --- bash -c / sh -c ---
+        ("bash-c-rm-rf",              'bash -c "rm -rf /tmp"',                   "block"),
+        ("sh-c-rm-rf",                "sh -c 'rm -rf /tmp'",                     "block"),
+        ("zsh-c-rm-rf",               'zsh -c "rm -rf /tmp"',                    "block"),
+
+        # --- Subshells and braces ---
+        ("subshell-rm-rf",            "(rm -rf /tmp)",                            "block"),
+        ("brace-group-rm",            "{ rm -rf /tmp; }",                         "block"),
+
+        # --- Command substitution ---
+        ("dollar-paren-rm",            "echo $(rm -rf /tmp)",                    "block"),
+        ("backtick-rm",                "echo `rm -rf /tmp`",                     "block"),
+
+        # --- Process substitution ---
+        ("proc-sub-rm",                "cat <(rm -rf /tmp)",                     "block"),
+
+        # --- Variable evasion ---
+        ("var-assign-rm",              "CMD=rm; $CMD -rf /tmp",                  "block"),
+
+        # --- ANSI-C escape ---
+        ("ansi-c-escape",              "$'\\x72\\x6d' -rf /tmp",                "block"),
+
+        # --- Sanity: safe compound commands must be ALLOWED ---
+        ("safe-chain-cd-ls",           "cd /tmp && ls -la",                      "allow"),
+        ("safe-pipe-grep",             "cat file.txt | grep pattern",            "allow"),
+        ("safe-semicolon",             "echo hello; echo world",                 "allow"),
+        ("safe-subshell",              "(echo hello)",                           "allow"),
+        ("safe-background",            "echo hello &",                           "allow"),
+        ("safe-env-ls",                "env ls -la",                             "allow"),
+        ("safe-nice-echo",             "nice -n 5 echo hello",                  "allow"),
+        ("safe-command-git-status",    "command git status",                     "allow"),
+    ]
+
+    for label, cmd, expect in cases:
+        runner.check_bash(label, cmd, expect, config)
+
+
 def test_sanity_checks(runner: TestRunner, config: Dict[str, Any]) -> None:
     """Verify that common safe operations are NOT blocked (no false positives)."""
     runner.section("Sanity Checks: safe operations should be ALLOWED")
@@ -671,6 +739,7 @@ def main() -> None:
 
     test_bash_rules(runner, config)
     test_evasion_bypasses(runner, config)
+    test_compound_command_bypasses(runner, config)
     test_zero_access_bash(runner, config)
     test_zero_access_read(runner, config)
     test_readonly_paths(runner, config)

@@ -165,6 +165,372 @@ def is_flag(token: str) -> bool:
 
 
 # ============================================================================
+# COMPOUND COMMAND SPLITTING
+# ============================================================================
+
+def split_compound_commands(command: str) -> List[str]:
+    """Split a shell command on &&, ||, ;, |, \\n, & while respecting quotes and nesting.
+
+    Returns a list of individual command segments to check independently.
+    """
+    segments: List[str] = []
+    current = ""
+    i = 0
+    length = len(command)
+    in_quote: Optional[str] = None
+    depth = 0  # nesting depth for (...), $(...)
+    in_backtick = False
+    escaped = False
+
+    while i < length:
+        c = command[i]
+
+        # Handle backslash escaping
+        if escaped:
+            current += c
+            escaped = False
+            i += 1
+            continue
+
+        if c == '\\':
+            escaped = True
+            current += c
+            i += 1
+            continue
+
+        # Handle quotes
+        if in_quote:
+            current += c
+            if c == in_quote:
+                in_quote = None
+            i += 1
+            continue
+
+        if c in ('"', "'"):
+            in_quote = c
+            current += c
+            i += 1
+            continue
+
+        # Handle backticks
+        if c == '`':
+            current += c
+            in_backtick = not in_backtick
+            i += 1
+            continue
+
+        if in_backtick:
+            current += c
+            i += 1
+            continue
+
+        # Handle nesting: $( and (
+        if c == '(' or (c == '$' and i + 1 < length and command[i + 1] == '('):
+            depth += 1
+            current += c
+            i += 1
+            continue
+
+        if c == ')' and depth > 0:
+            depth -= 1
+            current += c
+            i += 1
+            continue
+
+        # Only split at depth 0
+        if depth > 0:
+            current += c
+            i += 1
+            continue
+
+        # Split on && (two chars)
+        if c == '&' and i + 1 < length and command[i + 1] == '&':
+            seg = current.strip()
+            if seg:
+                segments.append(seg)
+            current = ""
+            i += 2
+            continue
+
+        # Split on || (two chars)
+        if c == '|' and i + 1 < length and command[i + 1] == '|':
+            seg = current.strip()
+            if seg:
+                segments.append(seg)
+            current = ""
+            i += 2
+            continue
+
+        # Split on | (pipe, single char — already excluded || above)
+        if c == '|':
+            seg = current.strip()
+            if seg:
+                segments.append(seg)
+            current = ""
+            i += 1
+            continue
+
+        # Split on ; (semicolon)
+        if c == ';':
+            seg = current.strip()
+            if seg:
+                segments.append(seg)
+            current = ""
+            i += 1
+            continue
+
+        # Split on newline
+        if c == '\n':
+            seg = current.strip()
+            if seg:
+                segments.append(seg)
+            current = ""
+            i += 1
+            continue
+
+        # Split on & (background, single — already excluded && above)
+        if c == '&':
+            seg = current.strip()
+            if seg:
+                segments.append(seg)
+            current = ""
+            i += 1
+            continue
+
+        current += c
+        i += 1
+
+    seg = current.strip()
+    if seg:
+        segments.append(seg)
+
+    return segments if segments else [command]
+
+
+# ============================================================================
+# COMMAND WRAPPER STRIPPING
+# ============================================================================
+
+# Wrappers that just prefix a command without changing its semantics
+_SIMPLE_WRAPPERS = {"command", "builtin", "nohup", "time"}
+
+# Wrappers that may have flags/args before the real command
+_SUDO_FLAGS_WITH_ARG = {"-u", "-g", "-C", "-D", "-R", "-T"}
+_SUDO_FLAGS_NO_ARG = {"-E", "-H", "-P", "-S", "-b", "-k", "-K", "-n", "-v"}
+
+
+def strip_command_wrappers(tokens: List[str]) -> List[str]:
+    """Strip known wrapper prefixes (env, sudo, command, nohup, etc.) to expose the real command."""
+    if not tokens:
+        return tokens
+
+    max_iterations = 10  # prevent infinite loops on pathological input
+    iterations = 0
+
+    while tokens and iterations < max_iterations:
+        iterations += 1
+        t0 = tokens[0].lower()
+
+        # Simple wrappers: just drop token[0]
+        if t0 in _SIMPLE_WRAPPERS:
+            tokens = tokens[1:]
+            continue
+
+        # env: skip token[0], then skip VAR=val assignments
+        if t0 == "env":
+            tokens = tokens[1:]
+            # Skip flags like -i, -u, -0, --
+            while tokens and tokens[0].startswith('-'):
+                if tokens[0] == '--':
+                    tokens = tokens[1:]
+                    break
+                tokens = tokens[1:]
+            # Skip VAR=val assignments
+            while tokens and '=' in tokens[0] and not tokens[0].startswith('-'):
+                # Make sure it looks like a variable assignment (VAR=...)
+                eq_pos = tokens[0].index('=')
+                varname = tokens[0][:eq_pos]
+                if varname.replace('_', '').isalnum():
+                    tokens = tokens[1:]
+                else:
+                    break
+            continue
+
+        # sudo: skip token[0], then skip sudo flags
+        if t0 == "sudo":
+            tokens = tokens[1:]
+            while tokens:
+                if tokens[0] == '--':
+                    tokens = tokens[1:]
+                    break
+                if tokens[0] in _SUDO_FLAGS_NO_ARG:
+                    tokens = tokens[1:]
+                elif tokens[0] in _SUDO_FLAGS_WITH_ARG:
+                    tokens = tokens[1:]  # skip flag
+                    if tokens:
+                        tokens = tokens[1:]  # skip flag's argument
+                elif tokens[0].startswith('-'):
+                    tokens = tokens[1:]  # skip unknown flag
+                else:
+                    break
+            continue
+
+        # nice: skip token[0], then skip optional -n N
+        if t0 == "nice":
+            tokens = tokens[1:]
+            if tokens and tokens[0] == "-n" and len(tokens) > 1:
+                tokens = tokens[2:]  # skip -n and its argument
+            elif tokens and tokens[0].startswith("-n"):
+                tokens = tokens[1:]  # skip -nN (combined)
+            elif tokens and tokens[0].startswith("--adjustment"):
+                tokens = tokens[1:]  # skip --adjustment=N
+            continue
+
+        # strace/ltrace: skip token[0] and all flags before the command
+        if t0 in ("strace", "ltrace"):
+            tokens = tokens[1:]
+            while tokens and tokens[0].startswith('-'):
+                tokens = tokens[1:]
+            continue
+
+        # No wrapper matched — stop
+        break
+
+    return tokens
+
+
+# ============================================================================
+# NESTED COMMAND EXTRACTION
+# ============================================================================
+
+def extract_nested_commands(command: str) -> List[str]:
+    """Extract commands from nested shell constructs (bash -c, $(), backticks, subshells).
+
+    Returns a list of inner command strings found within the command.
+    """
+    nested: List[str] = []
+
+    # 1. bash -c "...", sh -c "...", zsh -c "..."
+    for match in re.finditer(r'\b(?:bash|sh|zsh)\s+-c\s+(["\'])(.*?)\1', command):
+        inner = match.group(2)
+        if inner.strip():
+            nested.append(inner.strip())
+
+    # 2. $(...) command substitution — find balanced parens
+    i = 0
+    while i < len(command) - 1:
+        if command[i] == '$' and command[i + 1] == '(':
+            depth = 1
+            start = i + 2
+            j = start
+            in_q: Optional[str] = None
+            while j < len(command) and depth > 0:
+                c = command[j]
+                if in_q:
+                    if c == in_q:
+                        in_q = None
+                elif c in ('"', "'"):
+                    in_q = c
+                elif c == '(':
+                    depth += 1
+                elif c == ')':
+                    depth -= 1
+                j += 1
+            if depth == 0:
+                inner = command[start:j - 1].strip()
+                if inner:
+                    nested.append(inner)
+            i = j
+        else:
+            i += 1
+
+    # 3. Backtick substitution
+    parts = command.split('`')
+    # Odd-indexed parts are inside backticks
+    for idx in range(1, len(parts), 2):
+        inner = parts[idx].strip()
+        if inner:
+            nested.append(inner)
+
+    # 4. Process substitution <(...) and >(...)
+    for match in re.finditer(r'[<>]\(([^)]+)\)', command):
+        inner = match.group(1).strip()
+        if inner:
+            nested.append(inner)
+
+    # 5. Top-level subshells: command starts with ( and ends with )
+    stripped = command.strip()
+    if stripped.startswith('(') and stripped.endswith(')'):
+        inner = stripped[1:-1].strip()
+        if inner:
+            nested.append(inner)
+
+    # 6. Brace groups: { ...; }
+    if stripped.startswith('{') and stripped.endswith('}'):
+        inner = stripped[1:-1].strip()
+        if inner.endswith(';'):
+            inner = inner[:-1].strip()
+        if inner:
+            nested.append(inner)
+
+    return nested
+
+
+# ============================================================================
+# XARGS DANGER CHECK
+# ============================================================================
+
+# xargs flags that take an argument
+_XARGS_FLAGS_WITH_ARG = {"-I", "-L", "-n", "-P", "-s", "-E", "--max-args",
+                          "--max-procs", "--max-chars", "--replace", "--max-lines",
+                          "--eof"}
+
+def check_xargs_danger(tokens: List[str], config: Dict[str, Any]) -> Tuple[bool, str]:
+    """Check if xargs will execute a dangerous command.
+
+    Finds the command that xargs will run and checks it against rules.
+    """
+    # Skip "xargs" token[0]
+    remaining = tokens[1:]
+
+    # Skip xargs flags to find the command it will run
+    i = 0
+    while i < len(remaining):
+        t = remaining[i]
+        if t in _XARGS_FLAGS_WITH_ARG:
+            i += 2  # skip flag and its argument
+            continue
+        if t.startswith('-'):
+            i += 1  # skip single flag
+            continue
+        break
+
+    if i >= len(remaining):
+        return False, ""
+
+    # remaining[i:] is the command xargs will execute
+    xargs_cmd = " ".join(remaining[i:])
+    xargs_tokens = remaining[i:]
+
+    # Check evasion bypasses on the xargs target
+    evasion_blocked, evasion_reason = check_evasion_bypasses(xargs_cmd, xargs_tokens)
+    if evasion_blocked:
+        return True, f"xargs executing: {evasion_reason}"
+
+    # Check YAML rules against the xargs target
+    for rule in config.get("bashToolRules", []):
+        if match_rule(xargs_cmd, xargs_tokens, rule):
+            action = rule.get("action", "block")
+            reason = rule.get("reason", "Blocked by access control rule")
+            if action == "block":
+                return True, f"xargs executing blocked command: {reason}"
+            elif action == "ask":
+                return True, f"xargs executing restricted command: {reason}"
+
+    return False, ""
+
+
+# ============================================================================
 # STRUCTURED RULE MATCHING
 # ============================================================================
 
@@ -295,6 +661,27 @@ def check_evasion_bypasses(command: str, tokens: List[str]) -> Tuple[bool, str]:
                         f"(evasion attempt detected)"
                     )
 
+    # Bypass 4: Variable assignment + expansion to hide dangerous commands
+    # e.g. CMD=rm; $CMD -rf / or X=rm && $X file
+    _DANGEROUS_CMD_NAMES = {
+        "rm", "rmdir", "unlink", "shred", "mkfs", "dd", "kill", "killall",
+        "pkill", "chmod", "chown", "eval", "dropdb", "mysqladmin",
+    }
+    var_assign_match = re.findall(r'\b([A-Za-z_]\w*)=([^\s;|&]+)', command)
+    if var_assign_match:
+        has_dangerous_assign = any(
+            val.strip("'\"").lower() in _DANGEROUS_CMD_NAMES
+            for _, val in var_assign_match
+        )
+        has_var_expansion = '$' in command
+        if has_dangerous_assign and has_var_expansion:
+            return True, "variable assignment with dangerous command and expansion (evasion attempt detected)"
+
+    # Bypass 5: Hex/octal escape sequences in $'...' (ANSI-C quoting)
+    # e.g. $'\x72\x6d' -rf / (encodes "rm")
+    if "$'" in command and re.search(r"\$'[^']*\\[xX0-7][^']*'", command):
+        return True, "ANSI-C escape sequences in command (potential evasion attempt)"
+
     return False, ""
 
 
@@ -339,16 +726,25 @@ def check_path_patterns(
             except re.error:
                 continue
     else:
-        expanded = os.path.expanduser(path)
+        expanded = os.path.normpath(os.path.expanduser(path))
         escaped_expanded = re.escape(expanded)
         escaped_original = re.escape(path)
+
+        # Also normalize paths in the command for matching
+        normalized_command = command
+        for token in tokenize_command(command):
+            if '/' in token or token.startswith('~'):
+                normed = os.path.normpath(os.path.expanduser(token))
+                if normed != token:
+                    normalized_command = normalized_command.replace(token, normed)
 
         for pattern_template, operation in patterns:
             pattern_expanded = pattern_template.replace("{path}", escaped_expanded)
             pattern_original = pattern_template.replace("{path}", escaped_original)
             try:
                 if re.search(pattern_expanded, command, re.IGNORECASE) or \
-                   re.search(pattern_original, command, re.IGNORECASE):
+                   re.search(pattern_original, command, re.IGNORECASE) or \
+                   re.search(pattern_expanded, normalized_command, re.IGNORECASE):
                     return True, f"Blocked: {operation} operation on {path_type} {path}"
             except re.error:
                 continue
@@ -360,24 +756,31 @@ def check_path_patterns(
 # MAIN CHECK
 # ============================================================================
 
-def check_command(command: str, config: Dict[str, Any]) -> Tuple[bool, bool, str]:
-    """Check if command should be blocked or requires confirmation.
+def _check_single_segment(segment: str, config: Dict[str, Any]) -> Tuple[bool, bool, str]:
+    """Check a single command segment (no compound operators) against rules.
 
     Returns: (blocked, ask, reason)
-      - blocked=True, ask=False  → Block the command
-      - blocked=False, ask=True  → Show confirmation dialog
-      - blocked=False, ask=False → Allow the command
     """
-    tokens = tokenize_command(command)
+    tokens = tokenize_command(segment)
+    tokens = strip_command_wrappers(tokens)
 
-    # 1. Evasion bypass detectors (run first)
-    evasion_blocked, evasion_reason = check_evasion_bypasses(command, tokens)
+    if not tokens:
+        return False, False, ""
+
+    # 1. Evasion bypass detectors
+    evasion_blocked, evasion_reason = check_evasion_bypasses(segment, tokens)
     if evasion_blocked:
         return True, False, f"Blocked: {evasion_reason}"
 
-    # 2. Structured bash tool rules
+    # 2. xargs danger check
+    if tokens[0].lower() == "xargs":
+        xargs_blocked, xargs_reason = check_xargs_danger(tokens, config)
+        if xargs_blocked:
+            return True, False, f"Blocked: {xargs_reason}"
+
+    # 3. Structured bash tool rules
     for rule in config.get("bashToolRules", []):
-        if match_rule(command, tokens, rule):
+        if match_rule(segment, tokens, rule):
             action = rule.get("action", "block")
             reason = rule.get("reason", "Blocked by access control rule")
             if action == "ask":
@@ -385,7 +788,67 @@ def check_command(command: str, config: Dict[str, Any]) -> Tuple[bool, bool, str
             else:
                 return True, False, f"Blocked: {reason}"
 
-    # 3. Zero-access paths — block ANY operation referencing them
+    return False, False, ""
+
+
+def _clean_segment(segment: str) -> str:
+    """Strip shell syntax wrappers like { ... } from a segment."""
+    s = segment.strip()
+    # Brace groups: { cmd; } — strip braces
+    if s.startswith('{'):
+        s = s[1:].strip()
+    if s.endswith('}'):
+        s = s[:-1].strip()
+    if s.endswith(';'):
+        s = s[:-1].strip()
+    return s
+
+
+def check_command(command: str, config: Dict[str, Any], _depth: int = 0) -> Tuple[bool, bool, str]:
+    """Check if command should be blocked or requires confirmation.
+
+    Defense-in-depth: splits compound commands, strips wrappers, extracts
+    nested commands, and checks each part independently.
+
+    Returns: (blocked, ask, reason)
+      - blocked=True, ask=False  → Block the command
+      - blocked=False, ask=True  → Show confirmation dialog
+      - blocked=False, ask=False → Allow the command
+    """
+    # Layer 0: Run evasion checks on the FULL original command first.
+    # This catches cross-segment patterns like base64 decode piped to bash,
+    # or variable assignments combined with expansion across semicolons.
+    if _depth == 0:
+        full_tokens = tokenize_command(command)
+        evasion_blocked, evasion_reason = check_evasion_bypasses(command, full_tokens)
+        if evasion_blocked:
+            return True, False, f"Blocked: {evasion_reason}"
+
+    # Layer 1: Split compound commands (&&, ||, ;, |, \n, &)
+    segments = split_compound_commands(command)
+
+    for segment in segments:
+        segment = _clean_segment(segment)
+        if not segment:
+            continue
+        # Layer 2: Extract and recursively check nested commands
+        # (bash -c, $(), backticks, subshells) — depth-capped to prevent loops
+        if _depth < 3:
+            nested = extract_nested_commands(segment)
+            for nested_cmd in nested:
+                blocked, ask, reason = check_command(nested_cmd, config, _depth + 1)
+                if blocked or ask:
+                    return blocked, ask, reason
+
+        # Layer 3: Check the segment itself (with wrapper stripping)
+        blocked, ask, reason = _check_single_segment(segment, config)
+        if blocked or ask:
+            return blocked, ask, reason
+
+    # Layer 4: Path protections run against the FULL original command string.
+    # These use regex scanning, so they catch paths anywhere in compound commands.
+
+    # 4a. Zero-access paths — block ANY operation referencing them
     for zero_path in config.get("zeroAccessPaths", []):
         if is_glob_pattern(zero_path):
             glob_regex = glob_to_regex(zero_path)
@@ -402,13 +865,13 @@ def check_command(command: str, config: Dict[str, Any]) -> Tuple[bool, bool, str
                re.search(escaped_original, command, re.IGNORECASE):
                 return True, False, f"Blocked: zero-access path {zero_path} (no operations allowed)"
 
-    # 4. Read-only paths — block all modifications
+    # 4b. Read-only paths — block all modifications
     for readonly in config.get("readOnlyPaths", []):
         blocked, reason = check_path_patterns(command, readonly, READ_ONLY_BLOCKED, "read-only path")
         if blocked:
             return True, False, reason
 
-    # 5. No-delete paths — block only deletions
+    # 4c. No-delete paths — block only deletions
     for no_delete in config.get("noDeletePaths", []):
         blocked, reason = check_path_patterns(command, no_delete, NO_DELETE_BLOCKED, "no-delete path")
         if blocked:

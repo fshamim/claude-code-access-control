@@ -44,6 +44,37 @@ bashToolRules:
     reason: rmdir --ignore-fail-on-non-empty
     action: block
 
+  - id: rm-plain
+    command: rm
+    reason: rm deletes files permanently
+    action: block
+
+  - id: rmdir-plain
+    command: rmdir
+    reason: rmdir removes a directory permanently
+    action: block
+
+  - id: unlink
+    command: unlink
+    reason: unlink permanently removes a file
+    action: block
+
+  - id: trash
+    command: trash
+    reason: trash moves files to the trash
+    action: block
+
+  - id: trash-put
+    command: trash-put
+    reason: trash-put moves files to the trash
+    action: block
+
+  - id: mv-to-devnull
+    command: mv
+    args: ["/dev/null"]
+    reason: mv to /dev/null permanently destroys file contents
+    action: block
+
   # ---------------------------------------------------------------------------
   # PERMISSION CHANGES
   # ---------------------------------------------------------------------------
@@ -112,6 +143,20 @@ bashToolRules:
     command: git
     subcommand: filter-branch
     reason: git filter-branch rewrites entire history
+    action: block
+
+  - id: git-worktree-remove
+    command: git
+    subcommand: worktree
+    args: ["remove"]
+    reason: git worktree remove permanently deletes a worktree
+    action: block
+
+  - id: git-worktree-prune
+    command: git
+    subcommand: worktree
+    args: ["prune"]
+    reason: git worktree prune permanently removes stale worktree references
     action: block
 
   - id: git-commit
